@@ -26,7 +26,7 @@ let mqttClient = null;
 let roomsInfo = {}; // roomId -> info from retained messages
 let roomList = [];
 let joinedRoom = null;
-let clientId = 'miner-' + floor(random(100000, 999999));
+let clientId = 'miner-' + Math.floor(Math.random() * 900000 + 100000);
 let isMultiplayerHost = false;
 let playerStates = {}; // other players' states
 let lastPublishTime = 0;
@@ -53,23 +53,10 @@ function setup() {
     stars.push({x: random(width), y: random(height), s: random(8, 22), r: random(0, TWO_PI)});
   }
 
-  // create ship in centre
-  ship = new Ship(width / 2, height / 2);
-
-  // create player attached in ship initially
-  player = new Player(ship.x + 60, ship.y);
-  player.enterShip(ship);
-
-  // spawn asteroids
-  for (let i = 0; i < 18; i++) {
-    let a = new Asteroid(random(width), random(height), random(40, 110));
-    asteroids.push(a);
-  }
-
-  // spawn some ship wrecks in space
-  for (let i = 0; i < 6; i++) {
-    wrecks.push(new Wreck(random(width*0.2, width*0.8), random(height*0.2, height*0.8), random(60, 200)));
-  }
+  // world initialization deferred until classes are defined
+  setTimeout(() => {
+    if (typeof initWorld === 'function') initWorld(); else console.warn('initWorld not defined yet');
+  }, 0);
 
   // create shader canvas (WEBGL) for post-processing overlays
   shaderCanvas = createGraphics(window.innerWidth, window.innerHeight, WEBGL);
@@ -315,6 +302,24 @@ function draw() {
 
   // UI
   drawUI();
+
+  // notes overlay
+  if (showNotes) {
+    push(); resetMatrix();
+    fill(2,6,10,230); rectMode(CORNER); rect(40,60,width-80,height-120,10);
+    fill(180, 240, 255); textSize(20); textAlign(LEFT, TOP);
+    text('Notes / Logs', 64, 80);
+    fill(200); textSize(14);
+    let y = 112;
+    text('- Movement: Use WASD or Arrow keys to move (outside) and drive the ship (inside).', 64, y);
+    y += 26;
+    text('- Smelt: Enter your ship and press S to smelt Amancapine into Gems (use Gems for upgrades).', 64, y);
+    y += 26;
+    text('- Upgrade Menu: Press U to open the upgrade menu and spend Gems.', 64, y);
+    y += 36;
+    text('All we know is we can smelt the ores you find and yadda yadda!', 64, y);
+    pop();
+  }
 }
 
 function drawUI() {
@@ -753,6 +758,9 @@ class Player {
       if (keyIsDown(RIGHT_ARROW) || keyIsDown(68)) ax += 0.08;
       if (keyIsDown(UP_ARROW) || keyIsDown(87)) ay -= 0.08;
       if (keyIsDown(DOWN_ARROW) || keyIsDown(83)) ay += 0.08;
+  // apply thruster boost multiplier
+  let boost = this.thrusterBoost || 1;
+  ax *= boost; ay *= boost;
       this.vx += ax;
       this.vy += ay;
       // apply small damping
@@ -1235,6 +1243,27 @@ function mqttPublishPlayerState() {
   if (!mqttClient || !joinedRoom) return;
   let state = { x: player.x, y: player.y, inShip: player.inShip, vx: player.vx, vy: player.vy, name: clientId };
   mqttClient.publish('miner/room/' + joinedRoom + '/state/' + clientId, JSON.stringify(state));
+}
+
+// initialize world objects (called after classes are defined)
+function initWorld() {
+  // create ship in centre
+  ship = new Ship(width / 2, height / 2);
+
+  // create player attached in ship initially
+  player = new Player(ship.x + 60, ship.y);
+  player.enterShip(ship);
+
+  // spawn asteroids
+  for (let i = 0; i < 18; i++) {
+    let a = new Asteroid(random(width), random(height), random(40, 110));
+    asteroids.push(a);
+  }
+
+  // spawn some ship wrecks in space
+  for (let i = 0; i < 6; i++) {
+    wrecks.push(new Wreck(random(width*0.2, width*0.8), random(height*0.2, height*0.8), random(60, 200)));
+  }
 }
 
 
