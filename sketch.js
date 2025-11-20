@@ -16,6 +16,8 @@ let rope = null;
 let wrecks = [];
 let starShader;
 let shaderCanvas;
+let gameState = 'menu'; // 'menu' or 'playing'
+let menuButtons = [];
 
 function preload() {
   imgStar = loadImage('./star.png');
@@ -58,10 +60,81 @@ function setup() {
 
   // create shader canvas (WEBGL) for post-processing overlays
   shaderCanvas = createGraphics(window.innerWidth, window.innerHeight, WEBGL);
+
+  // create menu buttons (screen-space)
+  let bw = 260;
+  let bh = 56;
+  let cx = width/2;
+  let by = height/2 + 40;
+  menuButtons.push(new UIButton(cx, by - 60, bw, bh, 'Start Game', () => { gameState = 'playing'; }));
+  menuButtons.push(new UIButton(cx, by + 10, bw, bh, 'Options', () => { /* future options */ }));
+  menuButtons.push(new UIButton(cx, by + 80, bw, bh, 'Quit', () => { /* no-op for web */ }));
 }
 
 function draw() {
   background(5, 6, 15);
+
+  if (gameState === 'menu') {
+    // draw animated background stars for menu
+    let t = millis() * 0.0006;
+    push();
+    noStroke();
+    for (let st of stars) {
+      let parallax = 0.35 + 0.05 * sin(t + st.r);
+      let sx = (st.x - width/2) * parallax + width / 2 + 12 * sin(t * 0.3 + st.x * 0.001);
+      let sy = (st.y - height/2) * parallax + height / 2 + 8 * cos(t * 0.4 + st.y * 0.001);
+      push();
+      translate(sx, sy);
+      rotate(st.r + 0.2 * sin(t + st.x * 0.002));
+      tint(200, 220);
+      image(imgStar, 0, 0, st.s * 1.4, st.s * 1.4);
+      pop();
+    }
+    pop();
+
+    // shader overlay behind menu
+    if (shaderCanvas && starShader) {
+      shaderCanvas.push();
+      shaderCanvas.shader(starShader);
+      starShader.setUniform('u_resolution', [width, height]);
+      starShader.setUniform('u_time', millis() / 1000.0);
+      shaderCanvas.noStroke();
+      shaderCanvas.rectMode(CENTER);
+      shaderCanvas.translate(0, 0, 0);
+      shaderCanvas.rect(0, 0, width, height);
+      shaderCanvas.pop();
+      push(); resetMatrix(); imageMode(CORNER); tint(255,180); image(shaderCanvas,0,0,width,height); pop();
+    }
+
+    // Title
+    push();
+    resetMatrix();
+    textAlign(CENTER, CENTER);
+    translate(width/2, height/2 - 140);
+    // neon retro title effect
+    for (let i = 6; i >= 1; i--) {
+      fill(30, 120, 200, 20 * i);
+      textSize(80 + i*2);
+      textStyle(BOLD);
+      text('Minor Miner', 0, 0);
+    }
+    fill(120, 220, 255);
+    stroke(8, 20, 40);
+    strokeWeight(3);
+    textSize(72);
+    text('Minor Miner', 0, 0);
+    pop();
+
+    // draw buttons
+    for (let b of menuButtons) {
+      b.draw();
+    }
+
+    // small footer
+    push(); resetMatrix(); fill(180); textSize(12); textAlign(CENTER); text('Retro-futuristic space mining — built with p5.js', width/2, height - 28); pop();
+
+    return; // skip main game draw while menu active
+  }
 
   // camera follows player
   let camX = player.x;
@@ -640,9 +713,57 @@ class Wreck {
   }
 }
 
+// ---------------- UI: buttons and styles ----------------
+class UIButton {
+  constructor(x, y, w, h, label, onClick) {
+    this.x = x; this.y = y; this.w = w; this.h = h; this.label = label; this.onClick = onClick;
+  }
+
+  isMouseOver() {
+    return mouseX > this.x - this.w/2 && mouseX < this.x + this.w/2 && mouseY > this.y - this.h/2 && mouseY < this.y + this.h/2;
+  }
+
+  draw() {
+    push();
+    resetMatrix();
+    rectMode(CENTER);
+    translate(this.x, this.y);
+    let over = this.isMouseOver();
+    // glow layers
+    for (let i = 8; i >= 1; i--) {
+      let a = map(i, 1, 8, 12, 2);
+      fill(30, 150, 220, a * (over ? 1.4 : 1.0));
+      noStroke();
+      rect(0, 0, this.w + i*8, this.h + i*4, 18);
+    }
+    // main button
+    if (over) fill(40, 200, 255); else fill(20, 120, 180);
+    stroke(180); strokeWeight(1.6);
+    rect(0, 0, this.w, this.h, 14);
+
+    // inner sleek panel
+    noStroke();
+    fill(6, 20, 30, 100);
+    rect(0, 0, this.w - 12, this.h - 10, 12);
+
+    // label with retro font-like layers
+    textAlign(CENTER, CENTER);
+    for (let j = 4; j >= 1; j--) {
+      fill(0, 0, 0, 20 * j);
+      textSize(18 + j);
+      text(this.label, 0, -2);
+    }
+    fill(180, 255, 255);
+    textSize(20);
+    text(this.label, 0, -2);
+    pop();
+  }
+}
+
 // ------------------ Input handlers ------------------
 
 function keyPressed() {
+  if (gameState === 'menu') return; // ignore keys while in menu except mouse
   if (key === 'E' || key === 'e') {
     if (player.inShip) {
       player.exitShip();
@@ -680,6 +801,15 @@ function keyPressed() {
 }
 
 function mousePressed() {
+  if (gameState === 'menu') {
+    // check UI buttons
+    for (let b of menuButtons) {
+      if (b.isMouseOver()) {
+        if (b.onClick) b.onClick();
+      }
+    }
+    return;
+  }
   // allow clicking to mine as well
   player.mine();
 }
