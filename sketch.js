@@ -13,6 +13,9 @@ let stars = [];
 let player;
 let ship;
 let rope = null;
+let wrecks = [];
+let starShader;
+let shaderCanvas;
 
 function preload() {
   imgStar = loadImage('./star.png');
@@ -22,6 +25,8 @@ function preload() {
   imgUranium = loadImage('./uranium.png');
   imgBlood = loadImage('./BloodStone.png');
   imgAmancapine = loadImage('./Amancapine.png');
+  // load shader (vertex + fragment)
+  starShader = loadShader('star.vert', 'star.frag');
 }
 
 function setup() {
@@ -45,16 +50,32 @@ function setup() {
     let a = new Asteroid(random(width), random(height), random(40, 110));
     asteroids.push(a);
   }
+
+  // spawn some ship wrecks in space
+  for (let i = 0; i < 6; i++) {
+    wrecks.push(new Wreck(random(width*0.2, width*0.8), random(height*0.2, height*0.8), random(60, 200)));
+  }
+
+  // create shader canvas (WEBGL) for post-processing overlays
+  shaderCanvas = createGraphics(window.innerWidth, window.innerHeight, WEBGL);
 }
 
 function draw() {
   background(5, 6, 15);
 
-  // draw textured stars
+  // camera follows player
+  let camX = player.x;
+  let camY = player.y;
+
+  // draw parallax stars (background) relative to camera
   push();
+  noStroke();
   for (let st of stars) {
+    let parallax = 0.45; // stars move slower than world
+    let sx = (st.x - camX) * parallax + width / 2;
+    let sy = (st.y - camY) * parallax + height / 2;
     push();
-    translate(st.x, st.y);
+    translate(sx, sy);
     rotate(st.r);
     tint(255, 230);
     image(imgStar, 0, 0, st.s, st.s);
@@ -62,10 +83,20 @@ function draw() {
   }
   pop();
 
+  // world objects drawn with camera transform
+  push();
+  translate(width / 2 - camX, height / 2 - camY);
+
   // update and draw asteroids
   for (let ast of asteroids) {
     ast.update();
     ast.draw();
+  }
+
+  // wrecks
+  for (let w of wrecks) {
+    w.update();
+    w.draw();
   }
 
   // ship
@@ -80,6 +111,30 @@ function draw() {
   if (rope) {
     rope.update();
     rope.draw();
+  }
+
+  pop(); // end camera transform
+
+  // post-processing shader overlay (vignette + subtle star light)
+  if (shaderCanvas && starShader) {
+    shaderCanvas.push();
+    shaderCanvas.shader(starShader);
+    starShader.setUniform('u_resolution', [width, height]);
+    starShader.setUniform('u_time', millis() / 1000.0);
+    // draw a full-screen rectangle in shaderCanvas (WEBGL coordinates)
+    shaderCanvas.noStroke();
+    shaderCanvas.rectMode(CENTER);
+    shaderCanvas.translate(0, 0, 0);
+    shaderCanvas.rect(0, 0, width, height);
+    shaderCanvas.pop();
+
+    // draw shaderCanvas on top of 2D canvas
+    push();
+    resetMatrix();
+    imageMode(CORNER);
+    tint(255, 210);
+    image(shaderCanvas, 0, 0, width, height);
+    pop();
   }
 
   // UI
@@ -152,7 +207,7 @@ class Asteroid {
       // distance slightly outside surface
       let dist = this.r - random(8, 20);
       let type = random(types);
-      this.ores.push({type, angle, dist, img: imgs[type], mined: false});
+      this.ores.push({type, angle, dist, img: imgs[type], mined: false, size: random(22, 34)});
     }
   }
 
@@ -192,11 +247,12 @@ class Asteroid {
     // draw ores on surface
     for (let ore of this.ores) {
       if (ore.mined) continue;
-      let ox = cos(ore.angle) * ore.dist;
-      let oy = sin(ore.angle) * ore.dist;
+      let ox = cos(ore.angle) * (this.r - 6);
+      let oy = sin(ore.angle) * (this.r - 6);
       push();
       translate(ox, oy);
-      image(ore.img, 0, 0, 18, 18);
+      // draw ore larger and on top of asteroid surface
+      image(ore.img, 0, 0, ore.size, ore.size);
       pop();
     }
     pop();
@@ -214,8 +270,11 @@ class Ship {
   constructor(x, y) {
     this.x = x;
     this.y = y;
-    this.w = 160;
-    this.h = 80;
+    // make ship much larger (like an Among Us ship)
+    this.w = 560;
+    this.h = 220;
+    this.vx = 0;
+    this.vy = 0;
     this.furnaceTime = 0; // smelting timer
     this.furnaceBusy = false;
     this.furnaceProgress = 0;
@@ -223,10 +282,26 @@ class Ship {
   }
 
   update() {
-    // ship might drift a bit
-    // simple gentle bobbing
-    this.x += sin(frameCount * 0.003 + this.x) * 0.05;
-    this.y += cos(frameCount * 0.002 + this.y) * 0.03;
+    // ship movement: if player is inside, allow driving the ship
+    if (player && player.inShip) {
+      let ax = 0;
+      let ay = 0;
+      if (keyIsDown(LEFT_ARROW) || keyIsDown(65)) ax -= 0.12;
+      if (keyIsDown(RIGHT_ARROW) || keyIsDown(68)) ax += 0.12;
+      if (keyIsDown(UP_ARROW) || keyIsDown(87)) ay -= 0.12;
+      if (keyIsDown(DOWN_ARROW) || keyIsDown(83)) ay += 0.12;
+      this.vx += ax;
+      this.vy += ay;
+    } else {
+      // gentle idle drift when nobody's piloting
+      this.vx += sin(frameCount * 0.003 + this.x) * 0.002;
+      this.vy += cos(frameCount * 0.002 + this.y) * 0.0015;
+    }
+    // apply damping and update position
+    this.vx *= 0.985;
+    this.vy *= 0.985;
+    this.x += this.vx;
+    this.y += this.vy;
     // smelting
     if (this.furnaceBusy) {
       this.furnaceProgress += 1;
@@ -246,15 +321,15 @@ class Ship {
     noStroke();
     fill(120, 140, 180);
     rectMode(CENTER);
-    rect(0, 0, this.w, this.h, 8);
+    rect(0, 0, this.w, this.h, 16);
     fill(180);
-    ellipse(-this.w / 3, 0, this.h * 0.7, this.h * 0.7);
+    ellipse(-this.w / 3, 0, this.h * 0.9, this.h * 0.9);
     fill(60, 120, 180);
-    rect(this.w / 4, -this.h / 4, this.w / 3, this.h / 3, 6);
+    rect(this.w / 4, -this.h / 4, this.w / 3, this.h / 3, 8);
 
-    // window / airlock
-    fill(20, 40, 80);
-    ellipse(this.w / 2 - 12, 0, 28, 28);
+  // window / airlock (larger)
+  fill(20, 40, 80);
+  ellipse(this.w / 2 - 40, 0, 60, 60);
 
     // furnace indicator
     if (this.furnaceBusy) {
@@ -300,7 +375,8 @@ class Player {
   enterShip(s) {
     this.inShip = true;
     // attach player to ship center
-    this.x = s.x + 20;
+    // place player inside a larger ship near the airlock
+    this.x = s.x + s.w / 4;
     this.y = s.y;
     this.vx = 0;
     this.vy = 0;
@@ -498,6 +574,16 @@ class Rope {
         }
       }
     }
+
+    // apply a pulling force from the rope to the player's velocity so the rope tugs the player in
+    // This uses a proportional pull based on distance relative to maxLen.
+    let ax = this.anchor.x - this.player.x;
+    let ay = this.anchor.y - this.player.y;
+    let dd = sqrt(ax*ax + ay*ay) || 0.0001;
+    let pullFactor = constrain(dd / this.maxLen, 0, 1);
+    let pullStrength = 0.14; // tune to adjust how strongly the rope pulls
+    this.player.vx += (ax / dd) * pullStrength * pullFactor;
+    this.player.vy += (ay / dd) * pullStrength * pullFactor;
   }
 
   draw() {
@@ -508,6 +594,48 @@ class Rope {
     beginShape();
     for (let s of this.segments) vertex(s.x, s.y);
     endShape();
+    pop();
+  }
+}
+
+// simple ship wreck class (scattered debris / hull pieces)
+class Wreck {
+  constructor(x, y, size) {
+    this.x = x;
+    this.y = y;
+    this.size = size;
+    this.angle = random(TWO_PI);
+    this.vx = random(-0.2, 0.2);
+    this.vy = random(-0.2, 0.2);
+    this.spin = random(-0.01, 0.01);
+  }
+
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.angle += this.spin;
+    // wrap
+    if (this.x < -this.size) this.x = width + this.size;
+    if (this.x > width + this.size) this.x = -this.size;
+    if (this.y < -this.size) this.y = height + this.size;
+    if (this.y > height + this.size) this.y = -this.size;
+  }
+
+  draw() {
+    push();
+    translate(this.x, this.y);
+    rotate(this.angle);
+    tint(180, 80, 80);
+    image(imgAsteroid, 0, 0, this.size, this.size * 0.6);
+    // debris pieces
+    noStroke();
+    fill(180, 120, 120, 200);
+    for (let i = 0; i < 4; i++) {
+      let a = i * PI / 2 + 0.3;
+      let rx = cos(a) * (this.size / 3);
+      let ry = sin(a) * (this.size / 4);
+      rect(rx, ry, this.size / 8, this.size / 16);
+    }
     pop();
   }
 }
