@@ -10,6 +10,7 @@
 let imgStar, imgAsteroid, imgCoal, imgGold, imgUranium, imgBlood, imgAmancapine;
 let asteroids = [];
 let stars = [];
+let planets = [];
 let player;
 let ship;
 let rope = null;
@@ -60,6 +61,11 @@ function setup() {
   // spawn some ship wrecks in space
   for (let i = 0; i < 6; i++) {
     wrecks.push(new Wreck(random(width*0.2, width*0.8), random(height*0.2, height*0.8), random(60, 200)));
+  }
+
+  // spawn some colorful planets (background swirls)
+  for (let i = 0; i < 6; i++) {
+    planets.push(new Planet(random(ship.x - 2000, ship.x + 2000), random(ship.y - 2000, ship.y + 2000), random(120, 460)));
   }
 
   // create shader canvas (WEBGL) for post-processing overlays
@@ -316,7 +322,7 @@ function drawUI() {
   push();
   fill(200);
   textSize(12);
-  text('Controls: WASD / Arrow - move when outside. E - enter/exit ship. M - mine. S - smelt (in ship). 1 - upgrade rope (1 gem). 2 - upgrade ship (1 gem).', 20, height - 20);
+  text('Controls: WASD / Arrow - move. E - enter/exit ship. M - mine. S - smelt (in ship). U - upgrades menu. Space - jump inside ship.', 20, height - 20);
   pop();
 }
 
@@ -640,14 +646,35 @@ class Ship {
   fill(20, 40, 80);
   ellipse(this.w / 2 - 40, 0, 60, 60);
 
-    // furnace indicator
+    // furnace (draw inside on the left side)
+    push();
+    let fx = -this.w / 4;
+    let fy = this.h / 4;
+    translate(fx, fy);
+    // furnace body
+    fill(50, 40, 36);
+    stroke(80);
+    rect(0, 0, 72, 56, 6);
+    // furnace door
+    fill(28, 18, 16);
+    rect(0, 0, 44, 36, 4);
+    // small window/glass
+    fill(160, 80, 20, this.furnaceBusy ? 220 : 90);
+    ellipse(0, 0, 18, 14);
+    // progress bar below
+    noStroke();
+    fill(30);
+    rect(0, 20, 56, 8, 4);
     if (this.furnaceBusy) {
-      fill(255, 200, 0);
-      rect(-this.w / 4, this.h / 4, 30, 12, 3);
-    } else {
-      fill(80);
-      rect(-this.w / 4, this.h / 4, 30, 12, 3);
+      let pct = constrain(this.furnaceProgress / max(1, 120 - this.upgradeLevel * 12), 0, 1);
+      fill(255, 160, 0);
+      rectMode(CENTER);
+      rect(-14 + pct * 28, 20, 56 * pct, 8, 4);
+      // little flame indicator
+      fill(255, 120, 10, 180 + 80 * sin(millis() * 0.02));
+      triangle(-6, -4, 0, -18, 6, -4);
     }
+    pop();
     pop();
   }
 
@@ -656,7 +683,13 @@ class Ship {
   }
 
   startSmelt() {
+    // Must be inside the ship and near the furnace to start smelting
     if (this.furnaceBusy) return;
+    if (!player.inShip || !player.insideShip) return;
+    // furnace world position
+    let fx = this.x - this.w / 4;
+    let fy = this.y + this.h / 4;
+    if (dist(player.x, player.y, fx, fy) > 72) return; // too far from furnace
     if (player.inv.amancapine <= 0) return;
     // consume one Amancapine and start smelting
     player.inv.amancapine -= 1;
@@ -673,8 +706,10 @@ class Player {
     this.vy = 0;
     this.radius = 12;
     this.inShip = false;
+    this.insideShip = false; // true when walking around inside the ship
     this.oxygen = 200;
     this.maxOxygen = 200;
+  this.onFloor = false;
     this.health = 100;
     this.maxHealth = 100;
     this.inv = {coal:0, gold:0, uranium:0, blood:0, amancapine:0};
@@ -685,10 +720,10 @@ class Player {
 
   enterShip(s) {
     this.inShip = true;
-    // attach player to ship center
-    // place player inside a larger ship near the airlock
-    this.x = s.x + s.w / 4;
-    this.y = s.y;
+    this.insideShip = true; // now the player is inside and can walk around
+    // place player inside near the airlock entrance
+    this.x = s.x + s.w / 2 - 80;
+    this.y = s.y + (s.h / 2) - 36; // stand on the interior floor
     this.vx = 0;
     this.vy = 0;
     this.oxygen = this.maxOxygen; // refills instantly while inside
@@ -697,22 +732,61 @@ class Player {
   }
 
   exitShip() {
+    // exit to the outside world (only possible when inside)
+    this.insideShip = false;
     this.inShip = false;
-    // when exiting, create rope connecting to ship
+    // place the player outside near the airlock
+    this.x = ship.x + ship.w / 2 + 80;
+    this.y = ship.y;
+    this.vx = 0; this.vy = 0;
+    // create rope connecting back to ship
     rope = new Rope(ship, this, this.ropeMax);
   }
 
   update() {
     if (!this.alive) return;
 
-    if (this.inShip) {
-      // oxygen refills
+    if (this.inShip && this.insideShip) {
+      // interior walking behavior: simple gravity + floor collision
+      // oxygen refills while inside
       this.oxygen = min(this.maxOxygen, this.oxygen + 1.5);
-      // keep player near ship
-      this.x = ship.x + 20;
-      this.y = ship.y;
+
+      // horizontal walking
+      let walkAcc = 0.45;
+      if (keyIsDown(LEFT_ARROW) || keyIsDown(65)) this.vx -= walkAcc;
+      if (keyIsDown(RIGHT_ARROW) || keyIsDown(68)) this.vx += walkAcc;
+      // small jump / step
+      if ((keyIsDown(32) || keyIsDown(87)) && this.onFloor) {
+        this.vy = -9;
+        this.onFloor = false;
+      }
+
+      // gravity inside ship
+      this.vy += 0.8;
+      // damping
+      this.vx *= 0.88;
+      this.vy *= 0.98;
+
+      this.x += this.vx;
+      this.y += this.vy;
+
+      // compute interior bounds
+      let leftBound = ship.x - ship.w/2 + 18;
+      let rightBound = ship.x + ship.w/2 - 18;
+      let floorY = ship.y + ship.h/2 - 28;
+
+      // floor collision
+      if (this.y > floorY) {
+        this.y = floorY;
+        this.vy = 0;
+        this.onFloor = true;
+      }
+      // walls
+      if (this.x < leftBound) { this.x = leftBound; this.vx = 0; }
+      if (this.x > rightBound) { this.x = rightBound; this.vx = 0; }
+
     } else {
-      // zero-gravity movement via thrusters
+      // zero-gravity movement via thrusters when outside
       let ax = 0;
       let ay = 0;
       if (keyIsDown(LEFT_ARROW) || keyIsDown(65)) ax -= 0.08;
@@ -1028,11 +1102,15 @@ function keyPressed() {
     return;
   }
   if (key === 'E' || key === 'e') {
-    if (player.inShip) {
+    // Enter/exit logic: enter from outside by standing near airlock, exit to outside when inside
+    if (player.inShip && player.insideShip) {
+      // exit to outside
       player.exitShip();
     } else {
-      // if near ship, enter
-      if (ship.inside(player.x, player.y) || dist(player.x, player.y, ship.x, ship.y) < 60) {
+      // if near airlock (outside), enter interior
+      let airlockX = ship.x + ship.w/2 - 40;
+      let airlockY = ship.y;
+      if (dist(player.x, player.y, airlockX, airlockY) < 80) {
         player.enterShip(ship);
       }
     }
@@ -1054,21 +1132,7 @@ function keyPressed() {
     }
   }
 
-  if ((key === '1') && player.inShip) {
-    // upgrade rope length (cost 1 gem)
-    if (player.gems >= 1) {
-      player.gems -= 1;
-      // gem doubles upgrade effect: apply 2 levels
-      player.ropeMax += 150 * 2;
-    }
-  }
-
-  if ((key === '2') && player.inShip) {
-    if (player.gems >= 1) {
-      player.gems -= 1;
-      ship.upgradeLevel += 2; // gem doubles upgrade levels
-    }
-  }
+  // Upgrades are now purchased through the Upgrade Menu (press U) - number keys removed.
 }
 
 function mousePressed() {
@@ -1100,7 +1164,8 @@ function mousePressed() {
       let absX = px + 20 + bx + bw/2;
       let absY = py + 60 - upgradeScroll + iy + by + bh/2;
       if (mouseX > (absX - bw/2) && mouseX < (absX + bw/2) && mouseY > (absY - bh/2) && mouseY < (absY + bh/2)) {
-        // attempt purchase
+        // attempt purchase (only while in ship)
+        if (!player.inShip) break;
         let u = upgrades[i];
         if (player.gems >= u.cost) {
           // consume one gem and apply the upgrade twice (gem doubles effect)
