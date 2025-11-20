@@ -21,16 +21,6 @@ let menuButtons = [];
 let upgradeMenuOpen = false;
 let upgrades = [];
 let upgradeScroll = 0;
-let showNotes = false;
-let mqttClient = null;
-let roomsInfo = {}; // roomId -> info from retained messages
-let roomList = [];
-let joinedRoom = null;
-let clientId = 'miner-' + Math.floor(Math.random() * 900000 + 100000);
-let isMultiplayerHost = false;
-let playerStates = {}; // other players' states
-let lastPublishTime = 0;
-let publishInterval = 150; // ms
 
 function preload() {
   imgStar = loadImage('./star.png');
@@ -53,10 +43,23 @@ function setup() {
     stars.push({x: random(width), y: random(height), s: random(8, 22), r: random(0, TWO_PI)});
   }
 
-  // world initialization deferred until classes are defined
-  setTimeout(() => {
-    if (typeof initWorld === 'function') initWorld(); else console.warn('initWorld not defined yet');
-  }, 0);
+  // create ship in centre
+  ship = new Ship(width / 2, height / 2);
+
+  // create player attached in ship initially
+  player = new Player(ship.x + 60, ship.y);
+  player.enterShip(ship);
+
+  // spawn asteroids
+  for (let i = 0; i < 18; i++) {
+    let a = new Asteroid(random(width), random(height), random(40, 110));
+    asteroids.push(a);
+  }
+
+  // spawn some ship wrecks in space
+  for (let i = 0; i < 6; i++) {
+    wrecks.push(new Wreck(random(width*0.2, width*0.8), random(height*0.2, height*0.8), random(60, 200)));
+  }
 
   // create shader canvas (WEBGL) for post-processing overlays
   shaderCanvas = createGraphics(window.innerWidth, window.innerHeight, WEBGL);
@@ -66,8 +69,8 @@ function setup() {
   let bh = 56;
   let cx = width/2;
   let by = height/2 + 40;
-  menuButtons.push(new UIButton(cx, by - 60, bw, bh, 'Singleplayer', () => { gameState = 'playing'; }));
-  menuButtons.push(new UIButton(cx, by + 10, bw, bh, 'Multiplayer', () => { gameState = 'multimenu'; mqttConnect(); }));
+  menuButtons.push(new UIButton(cx, by - 60, bw, bh, 'Start Game', () => { gameState = 'playing'; }));
+  menuButtons.push(new UIButton(cx, by + 10, bw, bh, 'Options', () => { /* future options */ }));
   menuButtons.push(new UIButton(cx, by + 80, bw, bh, 'Quit', () => { /* no-op for web */ }));
 
   // define upgrade items
@@ -165,37 +168,6 @@ function draw() {
 
     return; // skip main game draw while menu active
   }
-
-  if (gameState === 'multimenu') {
-    // draw multiplayer server list and create server button
-    push(); resetMatrix();
-    fill(10,18,24,220); rectMode(CORNER); rect(40,80,width-80,height-160,12);
-    fill(200); textSize(22); textAlign(LEFT); text('Multiplayer - Available Servers', 72, 110);
-    // list rooms
-    let y = 150;
-    textSize(14);
-    if (roomList.length === 0) {
-      fill(160); text('No servers currently listed. You can create one.', 72, y);
-    }
-    for (let i = 0; i < roomList.length; i++) {
-      let id = roomList[i];
-      let info = roomsInfo[id] || {};
-      fill(220); textSize(16);
-      text(info.name || id, 72, y + i*40);
-      fill(150); text('Players: ' + (info.players ? info.players.length : 0), 420, y + i*40);
-      // join button
-      let bx = width - 200; let by = y + i*40 - 10;
-      fill(30,120,180); rect(bx, by, 120, 28, 6);
-      fill(240); textAlign(CENTER, CENTER); text('Join', bx+60, by+14);
-    }
-    // create server button
-    let cbx = width - 220; let cby = height - 140;
-    fill(40,180,220); rect(cbx, cby, 160, 44, 8);
-    fill(10); textAlign(CENTER, CENTER); textSize(16); text('Create Server', cbx+80, cby+22);
-    pop();
-    return;
-  }
-
   // ensure stars exist around player as they move (no out-of-bounds)
   ensureStarsAround(player.x, player.y);
 
@@ -248,32 +220,10 @@ function draw() {
   player.update();
   player.draw();
 
-  // draw other players (multiplayer) if present
-  for (let cid in playerStates) {
-    let s = playerStates[cid];
-    if (!s) continue;
-    push();
-    translate(s.x, s.y);
-    noStroke();
-    fill(200, 180, 60);
-    ellipse(0, 0, 18, 18);
-    fill(255);
-    textSize(10);
-    textAlign(CENTER, CENTER);
-    text(s.name || cid, 0, 22);
-    pop();
-  }
-
   // rope
   if (rope) {
     rope.update();
     rope.draw();
-  }
-
-  // publish our state periodically when in a joined room
-  if (mqttClient && joinedRoom && millis() - lastPublishTime > publishInterval) {
-    mqttPublishPlayerState();
-    lastPublishTime = millis();
   }
 
   pop(); // end camera transform
@@ -302,24 +252,6 @@ function draw() {
 
   // UI
   drawUI();
-
-  // notes overlay
-  if (showNotes) {
-    push(); resetMatrix();
-    fill(2,6,10,230); rectMode(CORNER); rect(40,60,width-80,height-120,10);
-    fill(180, 240, 255); textSize(20); textAlign(LEFT, TOP);
-    text('Notes / Logs', 64, 80);
-    fill(200); textSize(14);
-    let y = 112;
-    text('- Movement: Use WASD or Arrow keys to move (outside) and drive the ship (inside).', 64, y);
-    y += 26;
-    text('- Smelt: Enter your ship and press S to smelt Amancapine into Gems (use Gems for upgrades).', 64, y);
-    y += 26;
-    text('- Upgrade Menu: Press U to open the upgrade menu and spend Gems.', 64, y);
-    y += 36;
-    text('All we know is we can smelt the ores you find and yadda yadda!', 64, y);
-    pop();
-  }
 }
 
 function drawUI() {
@@ -338,20 +270,6 @@ function drawUI() {
   text('OXYGEN', 26, 58);
   pop();
 
-  // health bar
-  push();
-  fill(60);
-  stroke(150);
-  rect(20, 56, 220, 18);
-  noStroke();
-  fill(200,40,40);
-  let hW = map(player.health, 0, player.maxHealth, 0, 216);
-  rect(22, 58, hW, 14);
-  fill(255);
-  textSize(12);
-  text('HEALTH', 26, 74);
-  pop();
-
   // inventory
   push();
   fill(255);
@@ -364,7 +282,6 @@ function drawUI() {
   text('BloodStone: ' + player.inv.blood, ix, 110);
   text('Amancapine: ' + player.inv.amancapine, ix, 130);
   text('Gems: ' + player.gems, ix, 150);
-  text('Research: ' + player.research, ix, 170);
   pop();
 
   // help
@@ -555,9 +472,7 @@ class Asteroid {
     let d = sqrt(dx * dx + dy * dy);
     if (this.flying && d < this.r + player.radius) {
       // flying asteroid kills player on impact
-      // damage player
-      player.health -= 30;
-      if (player.health <= 0) player.die();
+      player.die();
     }
   }
 
@@ -653,21 +568,6 @@ class Ship {
     fill(120, 140, 180);
     rectMode(CENTER);
     rect(0, 0, this.w, this.h, 16);
-    // thruster flame when moving
-    let speed = sqrt(this.vx*this.vx + this.vy*this.vy);
-    if (speed > 0.3) {
-      push();
-      // flame direction opposite to velocity
-      let angle = atan2(this.vy, this.vx) + PI;
-      translate(cos(angle) * (this.w/2 + 6), sin(angle) * (this.h/6));
-      rotate(angle);
-      noStroke();
-      for (let i = 0; i < 4; i++) {
-        fill(255, 140 - i*30, 20, 220 - i*40);
-        triangle(-6 - i*6, 0, -26 - i*10, -6 - i*4, -26 - i*10, 6 + i*4);
-      }
-      pop();
-    }
     fill(180);
     ellipse(-this.w / 3, 0, this.h * 0.9, this.h * 0.9);
     fill(60, 120, 180);
@@ -716,10 +616,6 @@ class Player {
     this.gems = 0;
     this.alive = true;
     this.ropeMax = 320; // medium length
-    this.maxHealth = 100;
-    this.health = this.maxHealth;
-    this.thrusterBoost = 1;
-    this.research = 0;
   }
 
   enterShip(s) {
@@ -758,9 +654,6 @@ class Player {
       if (keyIsDown(RIGHT_ARROW) || keyIsDown(68)) ax += 0.08;
       if (keyIsDown(UP_ARROW) || keyIsDown(87)) ay -= 0.08;
       if (keyIsDown(DOWN_ARROW) || keyIsDown(83)) ay += 0.08;
-  // apply thruster boost multiplier
-  let boost = this.thrusterBoost || 1;
-  ax *= boost; ay *= boost;
       this.vx += ax;
       this.vy += ay;
       // apply small damping
@@ -834,7 +727,7 @@ class Player {
         case 'gold': this.inv.gold++; break;
         case 'uranium': this.inv.uranium++; break;
         case 'blood': this.inv.blood++; break;
-        case 'amancapine': this.inv.amancapine++; this.research += 5; break;
+        case 'amancapine': this.inv.amancapine++; break;
       }
     }
   }
@@ -1048,19 +941,6 @@ function keyPressed() {
     upgradeMenuOpen = !upgradeMenuOpen;
     return;
   }
-  // Tab toggles notes
-  if (keyCode === 9) { // Tab
-    showNotes = !showNotes;
-    return;
-  }
-  if (gameState === 'multimenu') {
-    // open/close with M
-    if (key === 'M' || key === 'm') {
-      // create a server (quick create)
-      mqttCreateRoom('Room-' + floor(random(1000,9999)));
-    }
-    return;
-  }
   if (upgradeMenuOpen) {
     // navigation
     if (keyCode === UP_ARROW) upgradeScroll -= 40;
@@ -1081,7 +961,6 @@ function keyPressed() {
   if (key === 'M' || key === 'm') {
     player.mine();
   }
-
 
   if ((key === 'S' || key === 's') && player.inShip) {
     ship.startSmelt();
@@ -1114,26 +993,6 @@ function mousePressed() {
     }
     return;
   }
-  if (gameState === 'multimenu') {
-    // check room join and create server button
-    // inspect room list region positions as drawn
-    let y = 150;
-    for (let i = 0; i < roomList.length; i++) {
-      let bx = width - 200; let by = y + i*40 - 10;
-      if (mouseX > bx && mouseX < bx + 120 && mouseY > by && mouseY < by + 28) {
-        let id = roomList[i];
-        mqttJoinRoom(id);
-        gameState = 'playing';
-        return;
-      }
-    }
-    let cbx = width - 220; let cby = height - 140;
-    if (mouseX > cbx && mouseX < cbx + 160 && mouseY > cby && mouseY < cby + 44) {
-      mqttCreateRoom('Room-' + floor(random(1000,9999)));
-      gameState = 'playing';
-      return;
-    }
-  }
   if (upgradeMenuOpen) {
     // check upgrade buy buttons
     // compute list area same as drawUpgradeMenu
@@ -1160,8 +1019,6 @@ function mousePressed() {
           player.gems -= u.cost;
           u.apply();
           u.apply();
-          // visual feedback: small popup
-          console.log('Purchased', u.name);
         }
       }
     }
@@ -1178,92 +1035,4 @@ function mouseWheel(event) {
     return false; // prevent page scroll
   }
 }
-
-// ------------------ MQTT Multiplayer (WebSocket) ------------------
-function mqttConnect() {
-  if (mqttClient) return;
-  // connect over WebSocket (browsers cannot use raw TCP 1883)
-  let url = 'ws://broker.emqx.io:8083/mqtt';
-  mqttClient = mqtt.connect(url, { clientId: clientId });
-  mqttClient.on('connect', () => {
-    console.log('MQTT connected');
-    // subscribe to room listings (retained messages)
-    mqttClient.subscribe('miner/rooms/#');
-    // request retained messages by subscribing
-  });
-  mqttClient.on('message', (topic, message) => {
-    try {
-      let msg = message.toString();
-      if (topic.startsWith('miner/rooms/')) {
-        let roomId = topic.split('/')[2];
-        try { roomsInfo[roomId] = JSON.parse(msg); } catch(e) { roomsInfo[roomId] = {name: msg}; }
-        // update room list
-        roomList = Object.keys(roomsInfo);
-      }
-      // presence messages
-      if (topic.startsWith('miner/rooms/')) {
-        // handled above
-      }
-      if (topic.startsWith('miner/room/')) {
-        // player states
-        // topic: miner/room/<roomId>/state/<clientId>
-        let parts = topic.split('/');
-        if (parts[3] === 'state') {
-          let rid = parts[2];
-          let cid = parts[4];
-          let obj = JSON.parse(msg);
-          if (cid !== clientId) playerStates[cid] = obj;
-        }
-      }
-    } catch(err) { console.error('MQTT message parse error', err); }
-  });
-}
-
-function mqttCreateRoom(name) {
-  if (!mqttClient) mqttConnect();
-  let roomId = 'room-' + floor(random(1000,9999));
-  let info = { name: name || roomId, host: clientId, players: [clientId] };
-  // publish retained room info
-  mqttClient.publish('miner/rooms/' + roomId, JSON.stringify(info), {retain:true});
-  // auto-join
-  mqttJoinRoom(roomId);
-  isMultiplayerHost = true;
-}
-
-function mqttJoinRoom(roomId) {
-  if (!mqttClient) mqttConnect();
-  joinedRoom = roomId;
-  // subscribe to player states
-  mqttClient.subscribe('miner/room/' + roomId + '/state/+');
-  // publish presence retained
-  mqttClient.publish('miner/rooms/' + roomId + '/presence/' + clientId, JSON.stringify({id:clientId, ts:Date.now()}), {retain:true});
-}
-
-function mqttPublishPlayerState() {
-  if (!mqttClient || !joinedRoom) return;
-  let state = { x: player.x, y: player.y, inShip: player.inShip, vx: player.vx, vy: player.vy, name: clientId };
-  mqttClient.publish('miner/room/' + joinedRoom + '/state/' + clientId, JSON.stringify(state));
-}
-
-// initialize world objects (called after classes are defined)
-function initWorld() {
-  // create ship in centre
-  ship = new Ship(width / 2, height / 2);
-
-  // create player attached in ship initially
-  player = new Player(ship.x + 60, ship.y);
-  player.enterShip(ship);
-
-  // spawn asteroids
-  for (let i = 0; i < 18; i++) {
-    let a = new Asteroid(random(width), random(height), random(40, 110));
-    asteroids.push(a);
-  }
-
-  // spawn some ship wrecks in space
-  for (let i = 0; i < 6; i++) {
-    wrecks.push(new Wreck(random(width*0.2, width*0.8), random(height*0.2, height*0.8), random(60, 200)));
-  }
-}
-
 
