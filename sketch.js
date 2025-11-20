@@ -18,6 +18,19 @@ let starShader;
 let shaderCanvas;
 let gameState = 'menu'; // 'menu' or 'playing'
 let menuButtons = [];
+let upgradeMenuOpen = false;
+let upgrades = [];
+let upgradeScroll = 0;
+let showNotes = false;
+let mqttClient = null;
+let roomsInfo = {}; // roomId -> info from retained messages
+let roomList = [];
+let joinedRoom = null;
+let clientId = 'miner-' + floor(random(100000, 999999));
+let isMultiplayerHost = false;
+let playerStates = {}; // other players' states
+let lastPublishTime = 0;
+let publishInterval = 150; // ms
 
 function preload() {
   imgStar = loadImage('./star.png');
@@ -66,9 +79,39 @@ function setup() {
   let bh = 56;
   let cx = width/2;
   let by = height/2 + 40;
-  menuButtons.push(new UIButton(cx, by - 60, bw, bh, 'Start Game', () => { gameState = 'playing'; }));
-  menuButtons.push(new UIButton(cx, by + 10, bw, bh, 'Options', () => { /* future options */ }));
+  menuButtons.push(new UIButton(cx, by - 60, bw, bh, 'Singleplayer', () => { gameState = 'playing'; }));
+  menuButtons.push(new UIButton(cx, by + 10, bw, bh, 'Multiplayer', () => { gameState = 'multimenu'; mqttConnect(); }));
   menuButtons.push(new UIButton(cx, by + 80, bw, bh, 'Quit', () => { /* no-op for web */ }));
+
+  // define upgrade items
+  upgrades.push({
+    id: 'rope',
+    name: 'Extend Rope',
+    desc: 'Increase rope max length by 120 units (applies twice when using a gem).',
+    cost: 1,
+    apply: () => { player.ropeMax += 120; }
+  });
+  upgrades.push({
+    id: 'ship',
+    name: 'Reinforce Ship',
+    desc: 'Improve ship furnace speed (upgrade level +1).',
+    cost: 1,
+    apply: () => { ship.upgradeLevel += 1; }
+  });
+  upgrades.push({
+    id: 'oxygen',
+    name: 'Oxygen Tanks',
+    desc: 'Increase maximum oxygen by 80.',
+    cost: 1,
+    apply: () => { player.maxOxygen += 80; player.oxygen = player.maxOxygen; }
+  });
+  upgrades.push({
+    id: 'thrusters',
+    name: 'Thruster Boost',
+    desc: 'Improve player thruster power when outside.',
+    cost: 1,
+    apply: () => { /* increase thruster power by adjusting constant */ player.thrusterBoost = (player.thrusterBoost || 1) + 0.25; }
+  });
 }
 
 function draw() {
@@ -136,6 +179,39 @@ function draw() {
     return; // skip main game draw while menu active
   }
 
+  if (gameState === 'multimenu') {
+    // draw multiplayer server list and create server button
+    push(); resetMatrix();
+    fill(10,18,24,220); rectMode(CORNER); rect(40,80,width-80,height-160,12);
+    fill(200); textSize(22); textAlign(LEFT); text('Multiplayer - Available Servers', 72, 110);
+    // list rooms
+    let y = 150;
+    textSize(14);
+    if (roomList.length === 0) {
+      fill(160); text('No servers currently listed. You can create one.', 72, y);
+    }
+    for (let i = 0; i < roomList.length; i++) {
+      let id = roomList[i];
+      let info = roomsInfo[id] || {};
+      fill(220); textSize(16);
+      text(info.name || id, 72, y + i*40);
+      fill(150); text('Players: ' + (info.players ? info.players.length : 0), 420, y + i*40);
+      // join button
+      let bx = width - 200; let by = y + i*40 - 10;
+      fill(30,120,180); rect(bx, by, 120, 28, 6);
+      fill(240); textAlign(CENTER, CENTER); text('Join', bx+60, by+14);
+    }
+    // create server button
+    let cbx = width - 220; let cby = height - 140;
+    fill(40,180,220); rect(cbx, cby, 160, 44, 8);
+    fill(10); textAlign(CENTER, CENTER); textSize(16); text('Create Server', cbx+80, cby+22);
+    pop();
+    return;
+  }
+
+  // ensure stars exist around player as they move (no out-of-bounds)
+  ensureStarsAround(player.x, player.y);
+
   // camera follows player
   let camX = player.x;
   let camY = player.y;
@@ -155,6 +231,11 @@ function draw() {
     pop();
   }
   pop();
+
+  // draw upgrade menu overlay if open
+  if (upgradeMenuOpen) {
+    drawUpgradeMenu();
+  }
 
   // world objects drawn with camera transform
   push();
@@ -180,10 +261,32 @@ function draw() {
   player.update();
   player.draw();
 
+  // draw other players (multiplayer) if present
+  for (let cid in playerStates) {
+    let s = playerStates[cid];
+    if (!s) continue;
+    push();
+    translate(s.x, s.y);
+    noStroke();
+    fill(200, 180, 60);
+    ellipse(0, 0, 18, 18);
+    fill(255);
+    textSize(10);
+    textAlign(CENTER, CENTER);
+    text(s.name || cid, 0, 22);
+    pop();
+  }
+
   // rope
   if (rope) {
     rope.update();
     rope.draw();
+  }
+
+  // publish our state periodically when in a joined room
+  if (mqttClient && joinedRoom && millis() - lastPublishTime > publishInterval) {
+    mqttPublishPlayerState();
+    lastPublishTime = millis();
   }
 
   pop(); // end camera transform
@@ -230,6 +333,20 @@ function drawUI() {
   text('OXYGEN', 26, 58);
   pop();
 
+  // health bar
+  push();
+  fill(60);
+  stroke(150);
+  rect(20, 56, 220, 18);
+  noStroke();
+  fill(200,40,40);
+  let hW = map(player.health, 0, player.maxHealth, 0, 216);
+  rect(22, 58, hW, 14);
+  fill(255);
+  textSize(12);
+  text('HEALTH', 26, 74);
+  pop();
+
   // inventory
   push();
   fill(255);
@@ -242,6 +359,7 @@ function drawUI() {
   text('BloodStone: ' + player.inv.blood, ix, 110);
   text('Amancapine: ' + player.inv.amancapine, ix, 130);
   text('Gems: ' + player.gems, ix, 150);
+  text('Research: ' + player.research, ix, 170);
   pop();
 
   // help
@@ -249,6 +367,139 @@ function drawUI() {
   fill(200);
   textSize(12);
   text('Controls: WASD / Arrow - move when outside. E - enter/exit ship. M - mine. S - smelt (in ship). 1 - upgrade rope (1 gem). 2 - upgrade ship (1 gem).', 20, height - 20);
+  pop();
+}
+
+// ------------------ Star management ------------------
+function ensureStarsAround(cx, cy) {
+  // spawn stars within an extended rect around the camera so the field appears infinite
+  let padX = width * 1.5;
+  let padY = height * 1.5;
+  let left = cx - padX/2;
+  let right = cx + padX/2;
+  let top = cy - padY/2;
+  let bottom = cy + padY/2;
+
+  // count how many stars currently in the rect
+  let count = 0;
+  for (let s of stars) {
+    if (s.x >= left && s.x <= right && s.y >= top && s.y <= bottom) count++;
+  }
+
+  let target = 140; // target stars in view area
+  let attempts = 0;
+  while (count < target && attempts < 500) {
+    attempts++;
+    let sx = random(left, right);
+    let sy = random(top, bottom);
+    let ss = random(6, 22);
+    let r = random(0, TWO_PI);
+    stars.push({x: sx, y: sy, s: ss, r: r});
+    count++;
+  }
+
+  // prune very distant stars to keep array size bounded
+  let maxDist = max(width, height) * 3;
+  for (let i = stars.length - 1; i >= 0; i--) {
+    let s = stars[i];
+    let dx = s.x - cx;
+    let dy = s.y - cy;
+    if (abs(dx) > maxDist || abs(dy) > maxDist) {
+      stars.splice(i, 1);
+    }
+  }
+}
+
+// ------------------ Upgrade menu ------------------
+function drawUpgradeMenu() {
+  push();
+  resetMatrix();
+  // dark overlay
+  fill(4, 8, 12, 200);
+  rectMode(CORNER);
+  rect(0, 0, width, height);
+
+  // panel
+  let pw = min(720, width - 120);
+  let ph = min(520, height - 160);
+  let px = (width - pw) / 2;
+  let py = (height - ph) / 2;
+  fill(10, 18, 30, 240);
+  stroke(50, 120, 160);
+  strokeWeight(2);
+  rect(px, py, pw, ph, 12);
+
+  // title
+  noStroke();
+  fill(160, 240, 255);
+  textSize(28);
+  textAlign(LEFT, TOP);
+  text('UPGRADES', px + 20, py + 14);
+  fill(160);
+  textSize(12);
+  text('Gems: ' + player.gems, px + pw - 110, py + 20);
+
+  // list area
+  let listX = px + 20;
+  let listY = py + 60;
+  let listW = pw - 40;
+  let itemH = 92;
+
+  // clamp scroll
+  let contentH = upgrades.length * (itemH + 12);
+  upgradeScroll = constrain(upgradeScroll, 0, max(0, contentH - (ph - 120)));
+
+  push();
+  translate(listX, listY - upgradeScroll);
+  for (let i = 0; i < upgrades.length; i++) {
+    let u = upgrades[i];
+    let iy = i * (itemH + 12);
+    // background
+    push();
+    translate(0, iy);
+    fill(18, 26, 40);
+    rect(0, 0, listW, itemH, 10);
+    stroke(40, 120, 180);
+    noFill();
+    rect(0, 0, listW, itemH, 10);
+
+    // text
+    noStroke();
+    fill(200);
+    textSize(16);
+    textAlign(LEFT, TOP);
+    text(u.name, 14, 8);
+    fill(160);
+    textSize(12);
+    text(u.desc, 14, 30, listW - 160, itemH - 36);
+
+    // purchase button
+    let bx = listW - 120;
+    let by = itemH / 2 - 16;
+    push();
+    translate(bx, by);
+    // draw small button
+    let bw = 96; let bh = 36;
+    // detect hover using global mouse pos
+    let absX = px + 20 + bx + bw/2;
+    let absY = py + 60 - upgradeScroll + iy + by + bh/2;
+    let hovering = mouseX > (absX - bw/2) && mouseX < (absX + bw/2) && mouseY > (absY - bh/2) && mouseY < (absY + bh/2);
+    if (hovering) fill(40,200,255); else fill(20,120,160);
+    rect(0, 0, bw, bh, 8);
+    fill(10, 20, 30, 180);
+    rect(0, 0, bw - 8, bh - 8, 6);
+    fill(220);
+    textSize(14);
+    textAlign(CENTER, CENTER);
+    text('Buy (' + u.cost + 'G)', 0, 0);
+    pop();
+
+    pop();
+  }
+  pop();
+
+  // small instruction
+  noStroke(); fill(140); textSize(12); textAlign(LEFT); text('Use mouse wheel or Arrow keys to scroll. Click Buy to spend 1 gem (applies upgrade twice).', px + 20, py + ph - 36);
   pop();
 }
 
@@ -299,7 +550,9 @@ class Asteroid {
     let d = sqrt(dx * dx + dy * dy);
     if (this.flying && d < this.r + player.radius) {
       // flying asteroid kills player on impact
-      player.die();
+      // damage player
+      player.health -= 30;
+      if (player.health <= 0) player.die();
     }
   }
 
@@ -395,6 +648,21 @@ class Ship {
     fill(120, 140, 180);
     rectMode(CENTER);
     rect(0, 0, this.w, this.h, 16);
+    // thruster flame when moving
+    let speed = sqrt(this.vx*this.vx + this.vy*this.vy);
+    if (speed > 0.3) {
+      push();
+      // flame direction opposite to velocity
+      let angle = atan2(this.vy, this.vx) + PI;
+      translate(cos(angle) * (this.w/2 + 6), sin(angle) * (this.h/6));
+      rotate(angle);
+      noStroke();
+      for (let i = 0; i < 4; i++) {
+        fill(255, 140 - i*30, 20, 220 - i*40);
+        triangle(-6 - i*6, 0, -26 - i*10, -6 - i*4, -26 - i*10, 6 + i*4);
+      }
+      pop();
+    }
     fill(180);
     ellipse(-this.w / 3, 0, this.h * 0.9, this.h * 0.9);
     fill(60, 120, 180);
@@ -443,6 +711,10 @@ class Player {
     this.gems = 0;
     this.alive = true;
     this.ropeMax = 320; // medium length
+    this.maxHealth = 100;
+    this.health = this.maxHealth;
+    this.thrusterBoost = 1;
+    this.research = 0;
   }
 
   enterShip(s) {
@@ -554,7 +826,7 @@ class Player {
         case 'gold': this.inv.gold++; break;
         case 'uranium': this.inv.uranium++; break;
         case 'blood': this.inv.blood++; break;
-        case 'amancapine': this.inv.amancapine++; break;
+        case 'amancapine': this.inv.amancapine++; this.research += 5; break;
       }
     }
   }
@@ -764,6 +1036,29 @@ class UIButton {
 
 function keyPressed() {
   if (gameState === 'menu') return; // ignore keys while in menu except mouse
+  if (key === 'U' || key === 'u') {
+    upgradeMenuOpen = !upgradeMenuOpen;
+    return;
+  }
+  // Tab toggles notes
+  if (keyCode === 9) { // Tab
+    showNotes = !showNotes;
+    return;
+  }
+  if (gameState === 'multimenu') {
+    // open/close with M
+    if (key === 'M' || key === 'm') {
+      // create a server (quick create)
+      mqttCreateRoom('Room-' + floor(random(1000,9999)));
+    }
+    return;
+  }
+  if (upgradeMenuOpen) {
+    // navigation
+    if (keyCode === UP_ARROW) upgradeScroll -= 40;
+    if (keyCode === DOWN_ARROW) upgradeScroll += 40;
+    return;
+  }
   if (key === 'E' || key === 'e') {
     if (player.inShip) {
       player.exitShip();
@@ -778,6 +1073,7 @@ function keyPressed() {
   if (key === 'M' || key === 'm') {
     player.mine();
   }
+
 
   if ((key === 'S' || key === 's') && player.inShip) {
     ship.startSmelt();
@@ -810,7 +1106,135 @@ function mousePressed() {
     }
     return;
   }
+  if (gameState === 'multimenu') {
+    // check room join and create server button
+    // inspect room list region positions as drawn
+    let y = 150;
+    for (let i = 0; i < roomList.length; i++) {
+      let bx = width - 200; let by = y + i*40 - 10;
+      if (mouseX > bx && mouseX < bx + 120 && mouseY > by && mouseY < by + 28) {
+        let id = roomList[i];
+        mqttJoinRoom(id);
+        gameState = 'playing';
+        return;
+      }
+    }
+    let cbx = width - 220; let cby = height - 140;
+    if (mouseX > cbx && mouseX < cbx + 160 && mouseY > cby && mouseY < cby + 44) {
+      mqttCreateRoom('Room-' + floor(random(1000,9999)));
+      gameState = 'playing';
+      return;
+    }
+  }
+  if (upgradeMenuOpen) {
+    // check upgrade buy buttons
+    // compute list area same as drawUpgradeMenu
+    let pw = min(720, width - 120);
+    let ph = min(520, height - 160);
+    let px = (width - pw) / 2;
+    let py = (height - ph) / 2;
+    let listX = px + 20;
+    let listY = py + 60;
+    let listW = pw - 40;
+    let itemH = 92;
+    for (let i = 0; i < upgrades.length; i++) {
+      let iy = i * (itemH + 12);
+      let bx = listW - 120;
+      let by = itemH / 2 - 16;
+      let bw = 96; let bh = 36;
+      let absX = px + 20 + bx + bw/2;
+      let absY = py + 60 - upgradeScroll + iy + by + bh/2;
+      if (mouseX > (absX - bw/2) && mouseX < (absX + bw/2) && mouseY > (absY - bh/2) && mouseY < (absY + bh/2)) {
+        // attempt purchase
+        let u = upgrades[i];
+        if (player.gems >= u.cost) {
+          // consume one gem and apply the upgrade twice (gem doubles effect)
+          player.gems -= u.cost;
+          u.apply();
+          u.apply();
+          // visual feedback: small popup
+          console.log('Purchased', u.name);
+        }
+      }
+    }
+    return;
+  }
+
   // allow clicking to mine as well
   player.mine();
 }
+
+function mouseWheel(event) {
+  if (upgradeMenuOpen) {
+    upgradeScroll += event.delta;
+    return false; // prevent page scroll
+  }
+}
+
+// ------------------ MQTT Multiplayer (WebSocket) ------------------
+function mqttConnect() {
+  if (mqttClient) return;
+  // connect over WebSocket (browsers cannot use raw TCP 1883)
+  let url = 'ws://broker.emqx.io:8083/mqtt';
+  mqttClient = mqtt.connect(url, { clientId: clientId });
+  mqttClient.on('connect', () => {
+    console.log('MQTT connected');
+    // subscribe to room listings (retained messages)
+    mqttClient.subscribe('miner/rooms/#');
+    // request retained messages by subscribing
+  });
+  mqttClient.on('message', (topic, message) => {
+    try {
+      let msg = message.toString();
+      if (topic.startsWith('miner/rooms/')) {
+        let roomId = topic.split('/')[2];
+        try { roomsInfo[roomId] = JSON.parse(msg); } catch(e) { roomsInfo[roomId] = {name: msg}; }
+        // update room list
+        roomList = Object.keys(roomsInfo);
+      }
+      // presence messages
+      if (topic.startsWith('miner/rooms/')) {
+        // handled above
+      }
+      if (topic.startsWith('miner/room/')) {
+        // player states
+        // topic: miner/room/<roomId>/state/<clientId>
+        let parts = topic.split('/');
+        if (parts[3] === 'state') {
+          let rid = parts[2];
+          let cid = parts[4];
+          let obj = JSON.parse(msg);
+          if (cid !== clientId) playerStates[cid] = obj;
+        }
+      }
+    } catch(err) { console.error('MQTT message parse error', err); }
+  });
+}
+
+function mqttCreateRoom(name) {
+  if (!mqttClient) mqttConnect();
+  let roomId = 'room-' + floor(random(1000,9999));
+  let info = { name: name || roomId, host: clientId, players: [clientId] };
+  // publish retained room info
+  mqttClient.publish('miner/rooms/' + roomId, JSON.stringify(info), {retain:true});
+  // auto-join
+  mqttJoinRoom(roomId);
+  isMultiplayerHost = true;
+}
+
+function mqttJoinRoom(roomId) {
+  if (!mqttClient) mqttConnect();
+  joinedRoom = roomId;
+  // subscribe to player states
+  mqttClient.subscribe('miner/room/' + roomId + '/state/+');
+  // publish presence retained
+  mqttClient.publish('miner/rooms/' + roomId + '/presence/' + clientId, JSON.stringify({id:clientId, ts:Date.now()}), {retain:true});
+}
+
+function mqttPublishPlayerState() {
+  if (!mqttClient || !joinedRoom) return;
+  let state = { x: player.x, y: player.y, inShip: player.inShip, vx: player.vx, vy: player.vy, name: clientId };
+  mqttClient.publish('miner/room/' + joinedRoom + '/state/' + clientId, JSON.stringify(state));
+}
+
 
