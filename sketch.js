@@ -21,6 +21,7 @@ let menuButtons = [];
 let upgradeMenuOpen = false;
 let upgrades = [];
 let upgradeScroll = 0;
+let notesOpen = false;
 
 function preload() {
   imgStar = loadImage('./star.png');
@@ -102,6 +103,10 @@ function setup() {
     cost: 1,
     apply: () => { /* increase thruster power by adjusting constant */ player.thrusterBoost = (player.thrusterBoost || 1) + 0.25; }
   });
+
+  // initial research tracking
+  player.researchPoints = 0;
+  player.discovered = {};
 }
 
 function draw() {
@@ -196,6 +201,12 @@ function draw() {
     drawUpgradeMenu();
   }
 
+  // draw notes overlay if open (on top of everything)
+  if (notesOpen) {
+    drawNotes();
+    return; // block game input while notes visible
+  }
+
   // world objects drawn with camera transform
   push();
   translate(width / 2 - camX, height / 2 - camY);
@@ -256,6 +267,20 @@ function draw() {
 
 function drawUI() {
   // oxygen bar
+  // health bar
+  push();
+  fill(80);
+  stroke(150);
+  rect(20, 52, 220, 18);
+  noStroke();
+  fill(220, 60, 60);
+  let hW = map(player.health, 0, player.maxHealth, 0, 216);
+  rect(22, 54, hW, 14);
+  fill(255);
+  textSize(12);
+  text('HEALTH', 26, 72);
+  pop();
+
   push();
   fill(60);
   stroke(150);
@@ -275,13 +300,16 @@ function drawUI() {
   fill(255);
   textSize(14);
   let ix = width - 220;
+  // inventory with icons
   text('Inventory:', ix, 30);
-  text('Coal: ' + player.inv.coal, ix, 50);
-  text('Gold: ' + player.inv.gold, ix, 70);
-  text('Uranium: ' + player.inv.uranium, ix, 90);
-  text('BloodStone: ' + player.inv.blood, ix, 110);
-  text('Amancapine: ' + player.inv.amancapine, ix, 130);
-  text('Gems: ' + player.gems, ix, 150);
+  let iconX = ix + 8;
+  imageMode(CORNER);
+  image(imgCoal, iconX, 40, 18, 18); text(' x ' + player.inv.coal, iconX + 22, 44);
+  image(imgGold, iconX, 62, 18, 18); text(' x ' + player.inv.gold, iconX + 22, 66);
+  image(imgUranium, iconX, 84, 18, 18); text(' x ' + player.inv.uranium, iconX + 22, 88);
+  image(imgBlood, iconX, 106, 18, 18); text(' x ' + player.inv.blood, iconX + 22, 110);
+  image(imgAmancapine, iconX, 128, 18, 18); text(' x ' + player.inv.amancapine, iconX + 22, 132);
+  fill(255); text('Gems: ' + player.gems, ix, 154);
   pop();
 
   // help
@@ -425,6 +453,41 @@ function drawUpgradeMenu() {
   pop();
 }
 
+// ------------------ Notes / Research overlay ------------------
+function drawNotes() {
+  push(); resetMatrix();
+  fill(6, 10, 16, 220); rect(0,0,width,height);
+  let pw = min(880, width - 120);
+  let ph = min(640, height - 160);
+  let px = (width - pw) / 2;
+  let py = (height - ph) / 2;
+  fill(10,18,28); stroke(40,100,140); rect(px, py, pw, ph, 10);
+  noStroke(); fill(180, 240, 255); textSize(24); textAlign(LEFT, TOP);
+  text('Notes & Research', px + 20, py + 18);
+
+  // instructions
+  fill(200); textSize(14);
+  let insX = px + 24; let insY = py + 56;
+  text('How to move: Use WASD or Arrow keys to thrust and maneuver when outside the ship. Enter/Exit ship with E.', insX, insY, pw - 48);
+  text('How to smelt: Enter the ship, press S to smelt one Amancapine into a gem using the furnace. Gems are used for upgrades.', insX, insY + 36, pw - 48);
+  text('\nAll we know is we can smelt the ores you find and yadda yadda!', insX, insY + 88, pw - 48);
+
+  // research summary
+  fill(180); textSize(16); text('Research Points: ' + (player.researchPoints || 0), px + 24, py + ph - 120);
+  textSize(12); fill(160); text('Discovered ore types:', px + 24, py + ph - 94);
+  let dX = px + 24; let dY = py + ph - 74; let idx = 0;
+  for (let t in player.discovered) {
+    if (player.discovered[t]) {
+      text('- ' + t, dX, dY + idx * 18);
+      idx++;
+    }
+  }
+
+  // hint
+  fill(140); textSize(12); text('Press R while in the ship to perform research (consumes 1 Amancapine -> +2 research points). Press Tab to close.', px + pw - 420, py + ph - 36);
+  pop();
+}
+
 function windowResized() {
   resizeCanvas(window.innerWidth, window.innerHeight);
 }
@@ -471,8 +534,8 @@ class Asteroid {
     let dy = player.y - this.y;
     let d = sqrt(dx * dx + dy * dy);
     if (this.flying && d < this.r + player.radius) {
-      // flying asteroid kills player on impact
-      player.die();
+      // flying asteroid damages player on impact
+      player.takeDamage(40);
     }
   }
 
@@ -612,6 +675,8 @@ class Player {
     this.inShip = false;
     this.oxygen = 200;
     this.maxOxygen = 200;
+    this.health = 100;
+    this.maxHealth = 100;
     this.inv = {coal:0, gold:0, uranium:0, blood:0, amancapine:0};
     this.gems = 0;
     this.alive = true;
@@ -729,7 +794,18 @@ class Player {
         case 'blood': this.inv.blood++; break;
         case 'amancapine': this.inv.amancapine++; break;
       }
+      // research: if first time discovering this ore type, grant a research point
+      if (!this.discovered) this.discovered = {};
+      if (!this.discovered[best.type]) {
+        this.discovered[best.type] = true;
+        this.researchPoints = (this.researchPoints || 0) + 1;
+      }
     }
+  }
+
+  takeDamage(amount) {
+    this.health -= amount;
+    if (this.health <= 0) this.die();
   }
 
   die() {
@@ -937,6 +1013,10 @@ class UIButton {
 
 function keyPressed() {
   if (gameState === 'menu') return; // ignore keys while in menu except mouse
+  if (keyCode === 9) { // Tab
+    notesOpen = !notesOpen;
+    return;
+  }
   if (key === 'U' || key === 'u') {
     upgradeMenuOpen = !upgradeMenuOpen;
     return;
@@ -964,6 +1044,14 @@ function keyPressed() {
 
   if ((key === 'S' || key === 's') && player.inShip) {
     ship.startSmelt();
+  }
+
+  if ((key === 'R' || key === 'r') && player.inShip) {
+    // research action: consume 1 Amancapine to gain 2 research points
+    if (player.inv.amancapine > 0) {
+      player.inv.amancapine -= 1;
+      player.researchPoints = (player.researchPoints || 0) + 2;
+    }
   }
 
   if ((key === '1') && player.inShip) {
