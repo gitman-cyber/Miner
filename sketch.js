@@ -65,7 +65,6 @@ function setup() {
 
   // spawn some colorful planets (background swirls)
   for (let i = 0; i < 6; i++) {
-    planets.push(new Planet(random(ship.x - 2000, ship.x + 2000), random(ship.y - 2000, ship.y + 2000), random(120, 460)));
   }
 
   // create shader canvas (WEBGL) for post-processing overlays
