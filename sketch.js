@@ -10,7 +10,6 @@
 let imgStar, imgAsteroid, imgCoal, imgGold, imgUranium, imgBlood, imgAmancapine;
 let asteroids = [];
 let stars = [];
-let planets = [];
 let player;
 let ship;
 let rope = null;
@@ -61,10 +60,6 @@ function setup() {
   // spawn some ship wrecks in space
   for (let i = 0; i < 6; i++) {
     wrecks.push(new Wreck(random(width*0.2, width*0.8), random(height*0.2, height*0.8), random(60, 200)));
-  }
-
-  // spawn some colorful planets (background swirls)
-  for (let i = 0; i < 6; i++) {
   }
 
   // create shader canvas (WEBGL) for post-processing overlays
